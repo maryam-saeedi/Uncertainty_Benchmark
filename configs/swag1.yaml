@@ -1,0 +1,6 @@
+defaults:
+  - dataset: mnist
+  - model: mlp
+  - method: swag
+  - optimizer: sgd
+seed: 11111

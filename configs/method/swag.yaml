@@ -1,0 +1,22 @@
+swag:
+  swa_start: 6
+
+epochs: 10
+sample_size: 2
+
+model:
+  name: mlp
+
+dataset:
+  input_dim: 784
+  num_classes: 10
+  hidden_dim: 128
+
+
+optimizer:
+  name: SGD
+  epochs: 10
+
+
+output:
+  path: 'results/swag/'

@@ -1,0 +1,6 @@
+defaults:
+  - dataset: mnist
+  - model: mlp
+  - method: influence_function
+  - optimizer: sgd
+seed: 11111

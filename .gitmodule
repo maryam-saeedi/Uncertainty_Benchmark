@@ -1,0 +1,9 @@
+[submodule "Morpho-MNIST"]
+	path = Morpho-MNIST
+	url = https://github.com/dccastro/Morpho-MNIST.git
+[submodule "quam"]
+	path = quam
+	url = https://github.com/ml-jku/quam.git
+[submodule "swa_gaussian"]
+    path = swa_gaussian
+    url = https://github.com/wjmaddox/swa_gaussian.git

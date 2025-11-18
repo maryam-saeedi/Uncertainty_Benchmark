@@ -1,0 +1,6 @@
+defaults:
+  - dataset: mnist
+  - model: mlp
+  - method: LA
+  - optimizer: sgd
+seed: 11111
