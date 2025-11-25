@@ -1,0 +1,9 @@
+defaults:
+  - dataset: mnist
+  - model: mlp
+  - method: swag
+  - optimizer: sgd
+seed: 11111
+output:
+  base_model_path: 'blur_mnist_result/common'
+  path: 'blur_mnist_result'
