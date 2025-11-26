@@ -1,7 +1,7 @@
 defaults:
   - dataset: mnist
   - model: mlp
-  - method: swag
+  - method: TTA
   - optimizer: sgd
 seed: 11111
 output:

@@ -36,29 +36,39 @@ def main(config: DictConfig) -> None:
     method = MethodFactory.create(config)
     uncertainties = {}
     for name in train_dl.keys():
-        if os.path.exists(os.path.join(config.output.base_model_path, f"base_model_{config.model.name}_{name}.pt")):
-            method.build_base_model(retrain=False, pretrained=os.path.join(config.output.base_model_path, f"base_model_{config.model.name}_{name}.pt"))
-        else:
-            method.build_base_model(retrain=True, loader=train_dl[name], model_name=f"base_model_{config.model.name}_{name}.pt")
-        os.makedirs(os.path.join(config.output.path, config.method.name, 'model'), exist_ok=True)
-        print(os.path.join(config.output.path, config.method.name, 'model', f"model_{name}.pt"))
-        if os.path.exists(os.path.join(config.output.path, config.method.name, 'model', f"model_{name}.pt")):
-            method.build_method(rebuild=False, train_dl=train_dl[name], pretrained=os.path.join(config.output.path, config.method.name, 'model', f"model_{name}.pt"))
-        else:
-            method.build_method(rebuild=True, train_dl=train_dl[name], valid_dl=val_dl[name], model_name=f"model_{name}.pt")
-
         ## inference
         os.makedirs(os.path.join(config.output.path, config.method.name, 'result'), exist_ok=True)
-        if os.path.exists(os.path.join(config.output.path, config.method.name, 'result', f'validset_predictions_{name}.pkl')):
-            with open(os.path.join(config.output.path, config.method.name, 'result', f'validset_predictions_{name}.pkl'), 'rb') as f:
-                validset_predictions = pickle.load(f)
-        else:
-            validset_predictions = method.inference(val_dl[name])
-            method.build_base_model(retrain=True, loader=train_dl[name])
-            with open(os.path.join(config.output.path, config.method.name, 'result', f'validset_predictions_{name}.pkl'), 'wb') as f:
-                pickle.dump(validset_predictions, f)
 
-        uncertainty = method.measure_uncertainty(validset_predictions)
+        if os.path.exists(os.path.join(config.output.path, config.method.name, 'result', f'validset_uncertainty_{name}.pkl')):
+            with open(os.path.join(config.output.path, config.method.name, 'result', f'validset_uncertainty_{name}.pkl'), 'rb') as f:
+                uncertainty = pickle.load(f)
+        else:
+            if os.path.exists(os.path.join(config.output.path, config.method.name, 'result', f'validset_predictions_{name}.pkl')):
+                with open(os.path.join(config.output.path, config.method.name, 'result', f'validset_predictions_{name}.pkl'), 'rb') as f:
+                    validset_predictions = pickle.load(f)
+            else:
+                if os.path.exists(os.path.join(config.output.base_model_path, f"base_model_{config.model.name}_{name}.pt")):
+                    method.build_base_model(retrain=False, pretrained=os.path.join(config.output.base_model_path,
+                                                                                   f"base_model_{config.model.name}_{name}.pt"))
+                else:
+                    method.build_base_model(retrain=True, loader=train_dl[name],
+                                            model_name=f"base_model_{config.model.name}_{name}.pt")
+                os.makedirs(os.path.join(config.output.path, config.method.name, 'model'), exist_ok=True)
+                print(os.path.join(config.output.path, config.method.name, 'model', f"model_{name}.pt"))
+                if os.path.exists(os.path.join(config.output.path, config.method.name, 'model', f"model_{name}.pt")):
+                    method.build_method(rebuild=False, train_dl=train_dl[name],
+                                        pretrained=os.path.join(config.output.path, config.method.name, 'model',
+                                                                f"model_{name}.pt"))
+                else:
+                    method.build_method(rebuild=True, train_dl=train_dl[name], valid_dl=val_dl[name],
+                                        model_name=f"model_{name}.pt")
+                print("inference")
+                validset_predictions = method.inference(val_dl[name])
+                with open(os.path.join(config.output.path, config.method.name, 'result', f'validset_predictions_{name}.pkl'), 'wb') as f:
+                    pickle.dump(validset_predictions, f)
+            uncertainty = method.measure_uncertainty(validset_predictions)
+            with open(os.path.join(config.output.path, config.method.name, 'result', f'validset_uncertainty_{name}.pkl'), 'wb') as f:
+                pickle.dump(uncertainty, f)
         uncertainties[name] = uncertainty
 
         print(validset_predictions.shape)
