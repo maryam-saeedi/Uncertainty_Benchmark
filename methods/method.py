@@ -4,6 +4,7 @@ import torch.nn as nn
 from omegaconf import OmegaConf
 import os
 from models.model_factory import ModelFactory
+from utils.metrics import *
 
 
 class Method(ABC):
@@ -41,9 +42,12 @@ class Method(ABC):
         if retrain:
             assert kwargs['loader'] is not None, "Loader must exists in order to re-train the model."
             self.train_base_model(kwargs['loader'])
-            output_save_dir = os.path.join(self.config.method.output.path, 'model')
-            os.makedirs(output_save_dir, exist_ok=True)
-            torch.save(self.model.state_dict(), os.path.join(output_save_dir, 'model.pt'))
+            os.makedirs(self.config.output.base_model_path, exist_ok=True)
+            if 'model_name' in kwargs:
+                model_name = kwargs['model_name']
+            else:
+                model_name = f'base_model_{self.config.model.name}.pt'
+            torch.save(self.model.state_dict(), os.path.join(self.config.output.base_model_path, model_name))
         else:
             assert kwargs['pretrained'] is not None, "Pretrained checkpoint cannot be None to use a pretrained model."
             self.model.load_state_dict(torch.load(kwargs['pretrained'], weights_only=True))
@@ -81,30 +85,34 @@ class Method(ABC):
             print(f'Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f}, Accuracy: {total_correct / len(loader.dataset):.4f}')
 
 
-    def build_method(self, rebuild=False):
+    def build_method(self, rebuild=False, **kwargs):
         if rebuild:
             self.train_method()
 
     def train_method(self):
         pass
 
-    def predict(self, inputs: torch.Tensor):
+    @abstractmethod
+    def inference(self, loader: torch.utils.data.DataLoader):
         """Make predictions in a conventional manner.
-
         Args:
             inputs: Input tensor
 
         Returns:
             The predictions of the model
         """
-        inputs = inputs.to(self.device)
-        self.model.eval()
+        predictions = []
+        for inputs, _ in loader:
+            inputs = inputs.to(self.device)
+            self.model.eval()
 
-        predictions = self.model(inputs)
+            prediction = self.model(inputs)
+            predictions.append(prediction)
+
+        predictions = torch.cat(predictions)
         return predictions
 
-    @abstractmethod
-    def measure_uncertainty(self, inputs: torch.Tensor, targets: torch.Tensor):
+    def measure_uncertainty(self, predictions):
         """Measure uncertainty. Must be implemented by child classes.
 
         Returns:
@@ -114,4 +122,27 @@ class Method(ABC):
                 - epistemic_uncertainty (model uncertainty)
                 - out_of_distribution (OOD score)
         """
-        return {}
+        aleatoric_uncertainty = -torch.mean(torch.sum(predictions * torch.log(predictions), dim=2), dim=1)
+
+        p_mean = torch.mean(predictions, dim=1)
+        total_uncertainty = -torch.sum(p_mean * torch.log(p_mean), dim=1)
+
+        epistemic_uncertainty = total_uncertainty - aleatoric_uncertainty
+
+        return {
+            "total_uncertainty": total_uncertainty.detach().cpu().numpy(),
+            "aleatoric_uncertainty": aleatoric_uncertainty.detach().cpu().numpy(),
+            "epistemic_uncertainty": epistemic_uncertainty.detach().cpu().numpy(),
+            "out_of_distribution": [0]*len(aleatoric_uncertainty),
+        }
+
+    def evaluate_method(self, predictions, targets):
+        nll = get_NLL_score(predictions, targets)
+        accuracy = get_acc_score(predictions, targets)
+        auc = get_auc_score(predictions, targets)
+
+        return {
+            "nll": nll.detach().cpu().numpy(),
+            "accuracy": accuracy.detach().cpu().numpy(),
+            "auc": auc
+        }
