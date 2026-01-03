@@ -1,0 +1,9 @@
+defaults:
+  - dataset: mnist
+  - model: mlp
+  - method: evidential_dl
+  - optimizer: sgd
+seed: 11111
+output:
+  base_model_path: 'epistemic_mnist_result/common'
+  path: 'epistemic_mnist_result'
