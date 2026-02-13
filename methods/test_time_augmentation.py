@@ -1,9 +1,13 @@
+from methods import register_method
 from methods.method import Method
 import torch
 import torch.nn.functional as F
 from torchvision.transforms import *
+from torchvision.transforms.v2 import *
 from tqdm import tqdm
 import importlib
+from torch import nn
+import matplotlib.pyplot as plt
 
 def build_transform(cfg):
     """Recursively build transforms (supports Compose, RandomChoice, etc.)."""
@@ -20,34 +24,104 @@ def build_transform(cfg):
     kwargs = {k: v for k, v in cfg.items() if k != '_type'}
     return cls(**kwargs)
 
+@register_method('tta')
 class TTA(Method):
     def __init__(self, config):
         super(TTA, self).__init__(config)
         self.default_augmentation = build_transform(config.method.augmentation)
         print(self.default_augmentation)
 
-    def measure_uncertainty(self, loader: torch.utils.data.DataLoader):
+    def inference(self, loader: torch.utils.data.DataLoader, enable_augmentation=True, enable_dropout=False):
         self.model.eval()
+        if enable_dropout:
+            for module in self.model.modules():
+                if isinstance(module, nn.Dropout):
+                    module.train()
+
         outputs = []
+        T = self.config.get('sample_size', 100)
+        labels = []
         with torch.no_grad():
             for inputs_, targets_ in tqdm(loader):
-                x = torch.cat([self.default_augmentation(inputs_) for _ in range(self.config.get('sample_size', 100))], dim=0)
+                # plt.imshow(inputs_[0].numpy().transpose(1, 2, 0))
+                # plt.show()
+                # transformed = self.default_augmentation(inputs_)
+                # plt.imshow(transformed[0].numpy().transpose(1, 2, 0))
+                # plt.show()
+                # print(inputs_)
+                if enable_augmentation:
+                    x = torch.cat([self.default_augmentation(in_) for _ in range(T) for in_ in inputs_], dim=0)
+                    x = x*255.
+                else:
+                    x = torch.cat([inputs_ for _ in range(T)], dim=0)
                 x = x.to(self.device)
                 output = self.model(x)
                 output = F.softmax(output, dim=-1)
-                outputs.append(output.unsqueeze(0))
+                output = output.view(T, 1, -1)
+                outputs.append(output)
+                labels.append(targets_)
 
-        predictions = torch.cat(outputs, dim=0)
-        aleatoric_uncertainty = -torch.mean(torch.sum(predictions * torch.log(predictions), dim=2), dim=1)
+        predictions = torch.cat(outputs, dim=1)
+        labels = torch.cat(labels, dim=0)
+        return predictions, labels
 
-        p_mean = torch.mean(predictions, dim=1)
-        total_uncertainty = -torch.sum(p_mean * torch.log(p_mean), dim=1)
+    def measure_uncertainty(self, loader: torch.utils.data.DataLoader):
+        """Measure uncertainty. Must be implemented by child classes.
 
-        epistemic_uncertainty = total_uncertainty - aleatoric_uncertainty
+        Returns:
+            Dictionary containing uncertainty measures:
+                - total_uncertainty
+                - aleatoric_uncertainty (data uncertainty)
+                - epistemic_uncertainty (model uncertainty)
+                - out_of_distribution (OOD score)
+        """
+        predictions, labels = self.inference(loader, enable_augmentation=True)
+        # print(predictions.shape)
+        # aleatoric_uncertainty = []
+        #
+        # for i in range(predictions.size(0)):
+        #     counts = torch.bincount(predictions[i], minlength=self.num_classes)
+        #     print(counts)
+        #     counts = counts[counts > 0]
+        #     print(torch.sum(counts.float() * torch.log(counts.float())))
+        #     aleatoric_uncertainty.append(torch.sum(counts.float() * torch.log(counts.float())))
+        #
+        # aleatoric_uncertainty = torch.tensor(aleatoric_uncertainty)
+        # print(aleatoric_uncertainty.shape)
+
+        p_mean = torch.mean(predictions, dim=0)
+        aleatoric_uncertainty = -torch.sum(p_mean * torch.log(p_mean + self.eps), dim=1)
+
+        predictions_, _ = self.inference(loader, enable_augmentation=False, enable_dropout=True)
+        # epistemic_uncertainty = []
+        #
+        # for i in range(predictions.size(0)):
+        #     counts = torch.bincount(predictions[i], minlength=self.num_classes)
+        #     counts = counts[counts > 0]
+        #     epistemic_uncertainty.append(torch.sum(counts.float() * torch.log(counts.float())))
+        #
+        # epistemic_uncertainty = torch.tensor(epistemic_uncertainty)
+        # print(epistemic_uncertainty.shape)
+
+        mean_pred = predictions_.mean(dim=0)
+        epistemic_uncertainty = -torch.sum(mean_pred * torch.log(mean_pred + self.eps), dim=1)
+
+        total_uncertainty = epistemic_uncertainty + aleatoric_uncertainty
+
+        var_epistemic = predictions.var(dim=0).sum(dim=-1)  # [B, C] --> [B]
+        var_aleatoric = (predictions * (1 - predictions)).mean(dim=0).sum(dim=-1)
+        var_total = var_epistemic + var_aleatoric
 
         return {
-            "total_uncertainty": total_uncertainty.detach().cpu().numpy(),
-            "aleatoric_uncertainty": aleatoric_uncertainty.detach().cpu().numpy(),
-            "epistemic_uncertainty": epistemic_uncertainty.detach().cpu().numpy(),
-            "out_of_distribution": 0,
+            "predictions": predictions.mode(dim=-1),
+            "predicted_labels": predictions.argmax(dim=-1).mode(dim=0),
+            "ground_truth": labels,
+            "total_uncertainty": total_uncertainty,
+            "aleatoric_uncertainty": aleatoric_uncertainty,
+            "epistemic_uncertainty": epistemic_uncertainty,
+            "mutual_information": torch.zeros(total_uncertainty.size(0)),
+            "variance_epistemic_uncertainty": var_epistemic,
+            "variance_aleatoric_uncertainty": var_aleatoric,
+            "variance_total_uncertainty": var_total,
+            "out_of_distribution": torch.zeros(total_uncertainty.size(0)),
         }
