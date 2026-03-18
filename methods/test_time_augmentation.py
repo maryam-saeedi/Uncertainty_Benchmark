@@ -43,21 +43,18 @@ class TTA(Method):
         labels = []
         with torch.no_grad():
             for inputs_, targets_ in tqdm(loader):
-                # plt.imshow(inputs_[0].numpy().transpose(1, 2, 0))
-                # plt.show()
-                # transformed = self.default_augmentation(inputs_)
-                # plt.imshow(transformed[0].numpy().transpose(1, 2, 0))
-                # plt.show()
-                # print(inputs_)
                 if enable_augmentation:
-                    x = torch.cat([self.default_augmentation(in_) for _ in range(T) for in_ in inputs_], dim=0)
-                    x = x*255.
+                    x = torch.stack(
+                        [self.default_augmentation(in_) for _ in range(T) for in_ in inputs_],
+                        dim=0
+                    )
+                    # x = x*255.    ## use if images were not normalized
                 else:
                     x = torch.cat([inputs_ for _ in range(T)], dim=0)
                 x = x.to(self.device)
                 output = self.model(x)
                 output = F.softmax(output, dim=-1)
-                output = output.view(T, 1, -1)
+                output = output.view(T, len(targets_), -1)
                 outputs.append(output)
                 labels.append(targets_)
 
@@ -76,32 +73,11 @@ class TTA(Method):
                 - out_of_distribution (OOD score)
         """
         predictions, labels = self.inference(loader, enable_augmentation=True)
-        # print(predictions.shape)
-        # aleatoric_uncertainty = []
-        #
-        # for i in range(predictions.size(0)):
-        #     counts = torch.bincount(predictions[i], minlength=self.num_classes)
-        #     print(counts)
-        #     counts = counts[counts > 0]
-        #     print(torch.sum(counts.float() * torch.log(counts.float())))
-        #     aleatoric_uncertainty.append(torch.sum(counts.float() * torch.log(counts.float())))
-        #
-        # aleatoric_uncertainty = torch.tensor(aleatoric_uncertainty)
-        # print(aleatoric_uncertainty.shape)
 
         p_mean = torch.mean(predictions, dim=0)
         aleatoric_uncertainty = -torch.sum(p_mean * torch.log(p_mean + self.eps), dim=1)
 
         predictions_, _ = self.inference(loader, enable_augmentation=False, enable_dropout=True)
-        # epistemic_uncertainty = []
-        #
-        # for i in range(predictions.size(0)):
-        #     counts = torch.bincount(predictions[i], minlength=self.num_classes)
-        #     counts = counts[counts > 0]
-        #     epistemic_uncertainty.append(torch.sum(counts.float() * torch.log(counts.float())))
-        #
-        # epistemic_uncertainty = torch.tensor(epistemic_uncertainty)
-        # print(epistemic_uncertainty.shape)
 
         mean_pred = predictions_.mean(dim=0)
         epistemic_uncertainty = -torch.sum(mean_pred * torch.log(mean_pred + self.eps), dim=1)
@@ -113,10 +89,10 @@ class TTA(Method):
         var_total = var_epistemic + var_aleatoric
 
         return {
-            "predictions": predictions.mode(dim=-1),
-            "predicted_labels": predictions.argmax(dim=-1).mode(dim=0),
+            "predictions": p_mean,
+            "predicted_labels": predictions.argmax(dim=-1).mode(dim=0).values,
             "ground_truth": labels,
-            "total_uncertainty": total_uncertainty,
+            "total_uncertainty": aleatoric_uncertainty,
             "aleatoric_uncertainty": aleatoric_uncertainty,
             "epistemic_uncertainty": epistemic_uncertainty,
             "mutual_information": torch.zeros(total_uncertainty.size(0)),
