@@ -1,5 +1,4 @@
-subset_of_weights: 'all'
+name: laplace_approximation
+subset_of_weights: 'last_layer'
 hessian_structure: 'diag'
-
-output:
-  path: 'results/laplace_approx/'
+num_samples: 1000
