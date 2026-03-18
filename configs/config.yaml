@@ -1,6 +1,10 @@
 defaults:
   - dataset: mnist
   - model: mlp
-  - method: single_model
+  - method: mc_dropout
   - optimizer: sgd
 seed: 11111
+weighted: False
+output:
+  path: 'mnist_noisy_label'
+  base_model_path: 'mnist_noisy_label/common'

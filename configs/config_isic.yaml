@@ -1,0 +1,9 @@
+defaults:
+  - dataset: isic
+  - model: DenseNet
+  - method: TTA
+  - optimizer: sgd
+seed: 11111
+output:
+  base_model_path: 'aleatoric_isic_result/common'
+  path: 'aleatoric_isic_result'
