@@ -3,22 +3,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
+
+from methods import register_method
 from methods.method import Method
 from swa_gaussian.swag.posteriors import SWAG
 import os
 
+@register_method('swag')
 class Swag(Method):
     def __init__(self, config):
         super(Swag, self).__init__(config)
-        self.init_model()
         self.swag_model = SWAG(
             self.model.__class__,
             no_cov_mat=False,
             max_num_models=20,
             config=config
         )
+        self.swag_model.to(self.device)
 
-    def train_epoch(self, loader, criterion, cuda=True):
+        self.eps = 1e-12
+
+    def train_epoch(self, loader, criterion):
         loss_sum = 0.0
         correct = 0.0
         verb_stage = 0
@@ -29,9 +34,7 @@ class Swag(Method):
         self.model.train()
 
         for i, (input, target) in enumerate(loader):
-            if cuda:
-                input = input.cuda(non_blocking=True)
-                target = target.cuda(non_blocking=True)
+            input, target = input.to(self.device), target.to(self.device)
 
             output = self.model(input)
             loss = criterion(output, target)
@@ -52,7 +55,7 @@ class Swag(Method):
             "accuracy": correct / num_objects_current * 100.0,
         }
 
-    def eval(self, loader, model, criterion, cuda=True):
+    def eval(self, loader, model, criterion):
         loss_sum = 0.0
         correct = 0.0
         num_objects_total = len(loader.dataset)
@@ -61,9 +64,7 @@ class Swag(Method):
 
         with torch.no_grad():
             for i, (input, target) in enumerate(loader):
-                if cuda:
-                    input = input.cuda(non_blocking=True)
-                    target = target.cuda(non_blocking=True)
+                input, target = input.to(self.device), target.to(self.device)
 
                 output = model(input)
                 loss = criterion(output, target)
@@ -88,6 +89,7 @@ class Swag(Method):
         with torch.no_grad():
             for input, target in loader:
                 # input = input.cuda(non_blocking=True)
+                input =input.to(self.device)
                 output = self.model(input)
 
                 batch_size = input.size(0)
@@ -105,11 +107,15 @@ class Swag(Method):
         flag = [False]
         model.apply(lambda module: self._check_bn(module, flag))
         return flag[0]
-
+    #
+    # def reset_bn(self, module):
+    #     if issubclass(module.__class__, torch.nn.modules.batchnorm._BatchNorm):
+    #         module.running_mean = torch.zeros_like(module.running_mean)
+    #         module.running_var = torch.ones_like(module.running_var)
     def reset_bn(self, module):
-        if issubclass(module.__class__, torch.nn.modules.batchnorm._BatchNorm):
-            module.running_mean = torch.zeros_like(module.running_mean)
-            module.running_var = torch.ones_like(module.running_var)
+        if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+            module.running_mean.zero_()
+            module.running_var.fill_(1.0)
 
     def _set_momenta(self, module, momenta):
         if issubclass(module.__class__, torch.nn.modules.batchnorm._BatchNorm):
@@ -130,15 +136,20 @@ class Swag(Method):
         """
         if not self.check_bn(model):
             return
+
         model.train()
         momenta = {}
         model.apply(self.reset_bn)
         model.apply(lambda module: self._get_momenta(module, momenta))
+        model.to(self.device)
+        if hasattr(model, "base"):
+            model.base.to(self.device)
         n = 0
         num_batches = len(loader)
 
         with torch.no_grad():
             for input, _ in loader:
+                input = input.to(self.device)
                 input_var = torch.autograd.Variable(input)
                 b = input_var.data.size(0)
 
@@ -152,32 +163,56 @@ class Swag(Method):
         model.apply(lambda module: self._set_momenta(module, momenta))
 
     def build_method(self, rebuild=False, **kwargs):
+        self.train_loader = kwargs['train_loader']
         if not rebuild:
-            self.swag_model.load_state_dict(torch.load(os.path.join(self.config.method.output.path, 'model', 'swag_model.pt')))
+            if 'pretrained' in kwargs:
+                pretrained_model = torch.load(kwargs['pretrained'])
+            else:
+                pretrained_model = torch.load(os.path.join(self.config.output.path, self.config.method.name, 'model', 'swag_model.pt'))
+            self.swag_model.load_state_dict(pretrained_model)
+            self.swag_model.to(self.device)
             return
-        self.train_method(kwargs['train_dl'], kwargs['valid_dl'])
-        output_save_dir = os.path.join(self.config.method.output.path, 'model')
+        self.train_uncertainty_method(kwargs['train_loader'], kwargs['valid_loader'])
+        output_save_dir = os.path.join(self.config.output.path, self.config.method.name, 'model')
         os.makedirs(output_save_dir, exist_ok=True)
-        torch.save(self.swag_model.state_dict(), os.path.join(output_save_dir, 'swag_model.pt'))
+        if 'model_name' in kwargs:
+            filename = os.path.join(output_save_dir,kwargs['model_name'])
+        else:
+            filename = os.path.join(output_save_dir, 'swag_model.pt')
+        torch.save(self.swag_model.state_dict(), filename)
 
 
-    def train_method(self, train_dl, valid_dl):
-        self.train_dl = train_dl
+    def train_uncertainty_method(self, train_loader, valid_loader):
+        if self.config.weighted:
+            if 'weights' in self.config.dataset:
+                weights = torch.tensor(self.config.dataset.weights).float().to(self.device)
+            else:
+                labels = torch.tensor(train_loader.dataset.labels)
+                class_counts = torch.bincount(labels, minlength=self.num_classes)
+                class_counts[class_counts == 0] = 1
 
-        criterion = nn.CrossEntropyLoss()
+                N = labels.size(0)
+                weights = N / (self.num_classes * class_counts.float())
+                weights = weights.to(self.device)
+            print("weights", weights)
+        else:
+            weights = None
+        criterion = nn.CrossEntropyLoss(weights)
         sgd_ens_preds = None
         sgd_targets = None
         n_ensembled = 0.0
         for epoch in range(self.config.method.epochs):
 
-            lr = 0.01
+            if (epoch + 1) > self.config.method.swa_start:
+                for group in self.optimizer.param_groups:
+                    group['lr'] = self.config.optimizer.lr * self.config.method.lr_increase_factor
 
-            train_res = self.train_epoch(train_dl, criterion, cuda=False)
+            train_res = self.train_epoch(train_loader, criterion)
 
-            test_res = self.eval(valid_dl, self.model, criterion, cuda=False)
-            if (epoch + 1) > self.config.method.swag.swa_start:
+            test_res = self.eval(valid_loader, self.model, criterion)
+            if (epoch + 1) > self.config.method.swa_start:
                 # sgd_preds, sgd_targets = utils.predictions(loaders["test"], model)
-                sgd_res = self.predict(valid_dl)
+                sgd_res = self.predict(valid_loader)
                 sgd_preds = sgd_res["predictions"]
                 sgd_targets = sgd_res["targets"]
                 print("updating sgd_ens")
@@ -191,59 +226,40 @@ class Swag(Method):
                 n_ensembled += 1
                 self.swag_model.collect_model(self.model)
 
-                self.swag_model.sample(0.0)
-                self.bn_update(train_dl, self.swag_model)
-                swag_res = self.eval(valid_dl, self.swag_model, criterion, cuda=False)
+                self.swag_model.sample(0.5, True)
+                self.bn_update(train_loader, self.swag_model)
+                swag_res = self.eval(valid_loader, self.swag_model, criterion)
                 print(f"epoch: {epoch+1}/{self.config.method.epochs}, swag_loss: {swag_res['loss']}, swag_acc: {swag_res['accuracy']}")
 
-            print(f"epoch: {epoch+1}/{self.config.method.epochs}, train_loss: {train_res["loss"]}, train_acc: {train_res["accuracy"]}, test_loss: {test_res["loss"]}, test_acc: {test_res['accuracy']}")
+            print(f"epoch: {epoch+1}/{self.config.method.epochs}, train_loss: {train_res['loss']}, train_acc: {train_res['accuracy']}, test_loss: {test_res['loss']}, test_acc: {test_res['accuracy']}")
 
-    def measure_uncertainty(self, loader, train_loader):
-
-        import numpy as np
-        import torch.nn.functional as F
-        from tqdm import tqdm
+    def inference(self, loader):
 
         eps = 1e-12
-        n_classes = 10
         n_samples = self.config.method.sample_size
         n_data = len(loader.dataset)
 
         # store per-sample predictive probabilities
-        all_probs = np.zeros((n_samples, n_data, n_classes))
+        predictions = torch.zeros((n_samples, n_data, self.num_classes))
+        labels = torch.zeros(n_data)
 
         for i in range(n_samples):
-            self.bn_update(train_loader, self.swag_model)
+            self.swag_model.train()
+            self.swag_model.sample(scale=0.5, cov=True)
+            self.bn_update(self.train_loader, self.swag_model)
             self.swag_model.eval()
 
             k = 0
             for input, target in tqdm(loader):
+                input = input.to(self.device)
                 self.swag_model.sample(scale=0.5, cov=True)
                 torch.manual_seed(i)
                 with torch.no_grad():
                     output = self.swag_model(input)
-                    probs = F.softmax(output, dim=1).cpu().numpy()
-                    all_probs[i, k:k + input.size(0), :] = probs
+                    probs = F.softmax(output, dim=1)
+                    predictions[i, k:k + input.size(0), :] = probs
+                    labels[k:k + input.size(0)] = target.to(self.device)
                 k += input.size(0)
 
-        # mean predictive probabilities
-        mean_probs = np.mean(all_probs, axis=0)  # shape: (N, C)
-
-        # --- Total uncertainty (predictive entropy)
-        total_uncertainty = -np.sum(mean_probs * np.log(mean_probs + eps), axis=1)
-
-        # --- Aleatoric uncertainty (expected entropy)
-        aleatoric_uncertainty = -np.mean(
-            np.sum(all_probs * np.log(all_probs + eps), axis=2),
-            axis=0
-        )
-
-        # --- Epistemic uncertainty
-        epistemic_uncertainty = total_uncertainty - aleatoric_uncertainty
-
-        return {
-            "total_uncertainty": total_uncertainty,
-            "aleatoric_uncertainty": aleatoric_uncertainty,
-            "epistemic_uncertainty": epistemic_uncertainty,
-            "out_of_distribution": 0,
-        }
+        #
+        return predictions, labels
